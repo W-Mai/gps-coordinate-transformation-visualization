@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#000000">
+    <meta name="description" content="GPS Coordinate Transformation Visualization">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="GPS Coordinate Vis">
+    <link rel="apple-touch-icon" href="icon.png">
+    <link rel="manifest" href="manifest.json">
+    <title>GPS Coordinate Transformation Visualization</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
+    <style>
+        #map {
+            height: 100vh;
+        }
+
+        .control-buttons {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+    <div class="control-buttons">
+        <button class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded" id="toggleGridButton">Toggle Grid</button>
+        <button class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded" id="locateButton">Locate Me</button>
+        <button class="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-4 rounded" id="toggleConversionButton">WGS84 to GCJ02</button>
+    </div>
+    <script>
+        // 初始化地图
+        var map = L.map('map').setView([0, 0], 2);
+
+        // 添加地图图层
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: 'Map data &copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a> contributors',
+            maxZoom: 18
+        }).addTo(map);
+
+        // 火星坐标和 WGS - 84 转换函数
+        function transformLat(x, y) {
+            var ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+            ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+            ret += (20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0;
+            ret += (160.0 * Math.sin(y / 12.0 * Math.PI) + 320 * Math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0;
+            return ret;
+        }
+
+        function transformLon(x, y) {
+            var ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+            ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+            ret += (20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0;
+            ret += (150.0 * Math.sin(x / 12.0 * Math.PI) + 300.0 * Math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0;
+            return ret;
+        }
+
+        function delta(lat, lon) {
+            var a = 6378245.0; // 地球长半轴
+            var ee = 0.00669342162296594323; // 扁率
+            var dLat = transformLat(lon - 105.0, lat - 35.0);
+            var dLon = transformLon(lon - 105.0, lat - 35.0);
+            var radLat = lat / 180.0 * Math.PI;
+            var magic = Math.sin(radLat);
+            magic = 1 - ee * magic * magic;
+            var sqrtMagic = Math.sqrt(magic);
+            dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
+            dLon = (dLon * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
+            return {
+                lat: dLat,
+                lon: dLon
+            };
+        }
+
+        function wgs84ToGcj02(wgLat, wgLon) {
+            var d = delta(wgLat, wgLon);
+            return {
+                lat: wgLat + d.lat,
+                lon: wgLon + d.lon
+            };
+        }
+
+        function gcj02ToWgs84(gcjLat, gcjLon) {
+            var d = delta(gcjLat, gcjLon);
+            return {
+                lat: gcjLat - d.lat,
+                lon: gcjLon - d.lon
+            };
+        }
+
+        // 绘制网格和向量图函数
+        function drawGridsAndVectors() {
+            if (!gridVisible) return;
+
+            // 清除之前的网格和向量
+            if (window.wgs84Lines) {
+                window.wgs84Lines.forEach(function (line) {
+                    map.removeLayer(line);
+                });
+            }
+            if (window.gcj02Lines) {
+                window.gcj02Lines.forEach(function (line) {
+                    map.removeLayer(line);
+                });
+            }
+            if (window.vectorLines) {
+                window.vectorLines.forEach(function (line) {
+                    map.removeLayer(line);
+                });
+            }
+
+            // 获取当前地图的边界
+            var bounds = map.getBounds();
+            var lonMin = bounds.getWest();
+            var lonMax = bounds.getEast();
+            var latMin = bounds.getSouth();
+            var latMax = bounds.getNorth();
+
+            // 根据缩放级别动态调整网格间隔
+            var zoom = map.getZoom();
+            var interval = Math.pow(2, 7 - zoom) / 2;
+
+            // 生成网格点
+            var lonGrid = [];
+            var latGrid = [];
+            for (var lon = Math.floor(lonMin / interval) * interval; lon <= lonMax; lon += interval) {
+                lonGrid.push(lon);
+            }
+            for (var lat = Math.floor(latMin / interval) * interval; lat <= latMax; lat += interval) {
+                latGrid.push(lat);
+            }
+
+            // 存储线条对象
+            window.wgs84Lines = [];
+            window.gcj02Lines = [];
+            window.vectorLines = [];
+
+            // 绘制原始 WGS - 84 网格
+            for (var j = 0; j < lonGrid.length; j++) {
+                var lon = lonGrid[j];
+                var line = L.polyline([
+                    [latMin, lon],
+                    [latMax, lon]
+                ], { color: 'blue', opacity: 0.5 }).addTo(map);
+                window.wgs84Lines.push(line);
+            }
+            for (var k = 0; k < latGrid.length; k++) {
+                var lat = latGrid[k];
+                var line = L.polyline([
+                    [lat, lonMin],
+                    [lat, lonMax]
+                ], { color: 'blue', opacity: 0.5 }).addTo(map);
+                window.wgs84Lines.push(line);
+            }
+
+            // 绘制火星坐标转换后的网格
+            for (var m = 0; m < latGrid.length; m++) {
+                var latPoints = [];
+                for (var n = 0; n < lonGrid.length; n++) {
+                    var lon = lonGrid[n];
+                    var lat = latGrid[m];
+                    var gcj = wgs84ToGcj02(lat, lon);
+                    latPoints.push([gcj.lat, gcj.lon]);
+                }
+                var line = L.polyline(latPoints, { color: 'green', opacity: 0.5 }).addTo(map);
+                window.gcj02Lines.push(line);
+            }
+            for (var p = 0; p < lonGrid.length; p++) {
+                var lonPoints = [];
+                for (var q = 0; q < latGrid.length; q++) {
+                    var lon = lonGrid[p];
+                    var lat = latGrid[q];
+                    var gcj = wgs84ToGcj02(lat, lon);
+                    lonPoints.push([gcj.lat, gcj.lon]);
+                }
+                var line = L.polyline(lonPoints, { color: 'green', opacity: 0.5 }).addTo(map);
+                window.gcj02Lines.push(line);
+            }
+
+            // 绘制向量图
+            for (var i = 0; i < latGrid.length; i++) {
+                for (var j = 0; j < lonGrid.length; j++) {
+                    var lon = lonGrid[j];
+                    var lat = latGrid[i];
+                    var wgs84Point = [lat, lon];
+                    var gcj02Point = wgs84ToGcj02(lat, lon);
+                    var vectorLine = L.polyline([wgs84Point, [gcj02Point.lat, gcj02Point.lon]], {
+                        color: 'red',
+                        opacity: 0.8,
+                        weight: 2
+                    }).addTo(map);
+                    window.vectorLines.push(vectorLine);
+                }
+            }
+        }
+
+        // 初始绘制网格和向量图
+        var gridVisible = true;
+        drawGridsAndVectors();
+
+        // 监听地图缩放和移动事件
+        map.on('zoomend moveend', function () {
+            drawGridsAndVectors();
+        });
+
+        // 定位当前位置
+        var locationMarker;
+        document.getElementById('locateButton').addEventListener('click', function () {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(function (position) {
+                    var lat = position.coords.latitude;
+                    var lon = position.coords.longitude;
+                    if (locationMarker) {
+                        map.removeLayer(locationMarker);
+                    }
+                    locationMarker = L.marker([lat, lon]).addTo(map);
+                    map.setView([lat, lon], 12);
+                }, function (error) {
+                    console.error('定位失败:', error.message);
+                });
+            } else {
+                console.error('浏览器不支持地理定位');
+            }
+        });
+
+        // 打开/关闭可视化网格
+        document.getElementById('toggleGridButton').addEventListener('click', function () {
+            gridVisible = !gridVisible;
+            drawGridsAndVectors();
+        });
+
+        // 切换坐标系转换方向
+        var conversionDirection = 'wgs84ToGcj02';
+        document.getElementById('toggleConversionButton').addEventListener('click', function () {
+            if (conversionDirection === 'wgs84ToGcj02') {
+                conversionDirection = 'gcj02ToWgs84';
+                this.textContent = 'GCJ02 to WGS84';
+            } else {
+                conversionDirection = 'wgs84ToGcj02';
+                this.textContent = 'WGS84 to GCJ02';
+            }
+            drawGridsAndVectors();
+        });
+
+        // 添加锚点
+        var anchorMarkers = [];
+        var arrowLines = [];
+        map.on('click', function (e) {
+            var lat = e.latlng.lat;
+            var lon = e.latlng.lng;
+            var sourcePoint = [lat, lon];
+            var targetPoint;
+            if (conversionDirection === 'wgs84ToGcj02') {
+                var gcj = wgs84ToGcj02(lat, lon);
+                targetPoint = [gcj.lat, gcj.lon];
+            } else {
+                var wgs = gcj02ToWgs84(lat, lon);
+                targetPoint = [wgs.lat, wgs.lon];
+            }
+
+            // 清除之前的锚点和箭头
+            anchorMarkers.forEach(function (marker) {
+                map.removeLayer(marker);
+            });
+            arrowLines.forEach(function (line) {
+                map.removeLayer(line);
+            });
+            anchorMarkers = [];
+            arrowLines = [];
+
+            // 添加新的锚点
+            var sourceMarker = L.marker(sourcePoint).addTo(map);
+            var targetMarker = L.marker(targetPoint).addTo(map);
+            anchorMarkers.push(sourceMarker, targetMarker);
+
+            // 添加箭头
+            var arrowLine = L.polyline([sourcePoint, targetPoint], {
+                color: 'orange',
+                opacity: 0.8,
+                weight: 2
+            }).addTo(map);
+            arrowLines.push(arrowLine);
+        });
+
+        // PWA 相关代码
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', function () {
+                navigator.serviceWorker.register('/service-worker.js')
+                   .then(function (registration) {
+                        console.log('ServiceWorker registration successful with scope: ', registration.scope);
+                    })
+                   .catch(function (err) {
+                        console.log('ServiceWorker registration failed: ', err);
+                    });
+            });
+        }
+    </script>
+</body>
+
+</html>    
